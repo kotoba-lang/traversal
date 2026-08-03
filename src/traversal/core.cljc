@@ -262,7 +262,11 @@
    ;; tile to touch fewer pages. Measured 2026-08-03, that is the right call
    ;; rather than an omission — at the page counts this rule produces, the
    ;; streaming penalty is 1.06-1.36x, and trading cache reuse away to avoid
-   ;; it would cost more than it saves. The 5x figure from a pointer chase is
+   ;; it would cost more than it saves. Caveat on that 1.06-1.36x: it came off
+   ;; a machine at a load average of 68 across 10 cores and has not passed a
+   ;; noise gate (machine-probe's :tlb probe refuses to restate it). It is
+   ;; enough to say the penalty is small, not enough to size against — which
+   ;; is exactly why nothing here sizes against it. The 5x figure from a pointer chase is
    ;; the wrong constant to design against; see machine/translation-regimes.
    :model/does-not-model [:associativity-conflicts :tlb-reach :prefetch :nuca-latency]
    ;; Honest status: this tile has NOT been shown to be the fast one. That is

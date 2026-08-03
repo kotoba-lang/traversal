@@ -331,6 +331,9 @@
     (is (nil? (t/pages-touched 0 {:rows 4 :row-span-bytes 8 :row-stride-bytes 8})))))
 
 (def ^:private mach-with-tlb
+  ;; A plausible shape for exercising the accessor, not a qualified
+  ;; measurement -- see machine/translation-penalty on why the real figures
+  ;; could not be restated on the machine that produced them.
   (assoc mach :tlb {:penalty-by-pages
                     {:dependent {16 1.00 256 1.41 512 1.73 2048 5.03}
                      :streaming {32 1.00 128 1.06 512 1.26}}
