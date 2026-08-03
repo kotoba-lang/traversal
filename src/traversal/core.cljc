@@ -256,6 +256,14 @@
    ["a square tile touched by `arrays` operands, the classic blocked-matmul shape"
     "capacity is the PRIVATE share of the level: total / cores sharing it"
     "occupancy < 1 because the tile shares the level with stack, code and neighbours"]
+   ;; `:tlb-reach` stays on this list even though the plan now reports pages
+   ;; and a penalty. Reporting a cost is not modelling it: the rule still
+   ;; picks the tile from bytes and capacity alone, and nothing here shrinks a
+   ;; tile to touch fewer pages. Measured 2026-08-03, that is the right call
+   ;; rather than an omission — at the page counts this rule produces, the
+   ;; streaming penalty is 1.06-1.36x, and trading cache reuse away to avoid
+   ;; it would cost more than it saves. The 5x figure from a pointer chase is
+   ;; the wrong constant to design against; see machine/translation-regimes.
    :model/does-not-model [:associativity-conflicts :tlb-reach :prefetch :nuca-latency]
    ;; Honest status: this tile has NOT been shown to be the fast one. That is
    ;; different from having been shown wrong, and the distinction is the whole
@@ -288,6 +296,36 @@
                    have to reach 0.27 ns per multiply-add, about one cycle,
                    for blocking to be worth measuring at all."}})
 
+(defn pages-touched
+  "How many distinct pages a strided 2D block lands on.
+
+  A tile's byte size does not tell you this. The same 512 KiB tile sits on 32
+  pages or on 512 depending only on the row stride of the matrix it is cut
+  from, and the difference is measurable: 1.11 vs 1.40 ns per element on the
+  part this was developed against, at identical bytes and identical run
+  length.
+
+  Two regimes, each exact in its own and wrong in the other, so it takes the
+  smaller:
+
+  - rows far apart (stride >= page): each row starts its own page, so the
+    count is `rows * pages-per-row`
+  - rows close together (stride < page): rows share pages and the block is
+    nearly contiguous, so the count is the span divided by the page
+
+  Assumes the block starts page-aligned. A misaligned start adds at most one
+  page per row, and this deliberately does not pad for it: the number is a
+  planning input, and inflating it would let it veto tiles on arithmetic
+  rather than on measurement."
+  [page-bytes {:keys [rows row-span-bytes row-stride-bytes]}]
+  (when (and (pos-int? page-bytes) (pos-int? rows)
+             (pos-int? row-span-bytes) (pos-int? row-stride-bytes))
+    (let [ceil-div (fn [a b] (quot (+ a (dec b)) b))
+          span (+ (* (dec rows) row-stride-bytes) row-span-bytes)
+          per-row (* rows (ceil-div row-span-bytes page-bytes))
+          contiguous (ceil-div span page-bytes)]
+      (max 1 (min per-row contiguous)))))
+
 (defn tile-plan
   "The largest square tile whose working set still fits a named cache level.
 
@@ -311,6 +349,7 @@
         rounded (max per-line (* per-line (quot raw per-line)))
         tile (max 1 (apply min rounded extents))
         working-set (* arrays tile tile element-bytes)]
+    (merge
     {:format format-id
      :tile/size tile
      :tile/arrays arrays
@@ -324,7 +363,27 @@
      :tile/elements-per-line per-line
      :tile/tiles (mapv #(quot (+ % (dec tile)) tile) extents)
      :tile/model tile-model
-     :tile/machine (:machine/id machine)}))
+     :tile/machine (:machine/id machine)}
+    ;; Pages are REPORTED, never sized against. The rule above still picks the
+    ;; tile purely from bytes and capacity; this says what that choice costs in
+    ;; translation so a caller can see it rather than discover it. Sizing
+    ;; against it would need a validated penalty on this workload, and the
+    ;; measurement so far says the streaming penalty is small enough that
+    ;; trading cache reuse for it would be the worse deal.
+    (let [page (get-in machine [:page :base-bytes])
+          pages (some-> page
+                        (pages-touched {:rows tile
+                                        :row-span-bytes (* tile element-bytes)
+                                        :row-stride-bytes (* (first extents)
+                                                             element-bytes)})
+                        (* arrays))]
+      (cond-> {}
+        pages (assoc :tile/pages-touched pages)
+        pages (assoc :tile/translation-penalty
+                     ;; Named regime, no default: a blocked kernel streams.
+                     ;; `nil` here means the machine carries no measured curve,
+                     ;; which is a missing fact and not a penalty of 1.0.
+                     (m/translation-penalty machine pages :streaming)))))))
 
 (defn tile-origins
   "Origins of every tile covering `extents`, in row-major tile order."

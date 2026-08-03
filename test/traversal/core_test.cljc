@@ -303,3 +303,68 @@
                (t/tiling-benefit m1max-tile
                                  {:n 768 :tile 48 :element-bytes 8 :arrays 3
                                   :loop-ns-per-op 0.5}))))
+
+;; ── translation (pages a tile lands on) ──────────────────────────────────
+
+(deftest pages-touched-has-two-regimes-and-takes-the-smaller
+  (testing "rows far apart: each row starts its own page"
+    ;; 512 rows, 1 KiB of payload each, 16 KiB apart -> 512 pages
+    (is (= 512 (t/pages-touched 16384 {:rows 512 :row-span-bytes 1024
+                                       :row-stride-bytes 16384}))))
+  (testing "rows close together: they share pages, and the block is contiguous"
+    ;; the same 512 KiB of payload packed at a 1 KiB stride -> 32 pages
+    (is (= 32 (t/pages-touched 16384 {:rows 512 :row-span-bytes 1024
+                                      :row-stride-bytes 1024}))))
+  (testing "a row wider than a page costs more than one page per row"
+    (is (= 64 (t/pages-touched 16384 {:rows 32 :row-span-bytes 32768
+                                      :row-stride-bytes 65536}))))
+  (testing "identical bytes, 16x the pages -- which is the whole point: byte
+            size does not tell you the translation cost"
+    (let [packed (t/pages-touched 16384 {:rows 512 :row-span-bytes 1024
+                                         :row-stride-bytes 1024})
+          spread (t/pages-touched 16384 {:rows 512 :row-span-bytes 1024
+                                         :row-stride-bytes 16384})]
+      (is (= 16 (quot spread packed)))))
+  (testing "nonsense in, nil out rather than a confident zero"
+    (is (nil? (t/pages-touched 16384 {:rows 0 :row-span-bytes 1024
+                                      :row-stride-bytes 1024})))
+    (is (nil? (t/pages-touched 0 {:rows 4 :row-span-bytes 8 :row-stride-bytes 8})))))
+
+(def ^:private mach-with-tlb
+  (assoc mach :tlb {:penalty-by-pages
+                    {:dependent {16 1.00 256 1.41 512 1.73 2048 5.03}
+                     :streaming {32 1.00 128 1.06 512 1.26}}
+                    :source "traversal test fixture"
+                    :runtime :jvm}))
+
+(deftest tile-plan-reports-pages-and-the-streaming-penalty
+  (let [p (t/tile-plan mach-with-tlb {:extents [4096 4096] :element-bytes 8
+                                      :arrays 3 :level 2})]
+    (is (pos-int? (:tile/pages-touched p)))
+    (testing "the penalty is read at the STREAMING regime -- a blocked kernel
+              streams, and the pointer-chase figure would be the wrong constant"
+      (is (= (m/translation-penalty mach-with-tlb (:tile/pages-touched p) :streaming)
+             (:tile/translation-penalty p))))))
+
+(deftest a-machine-without-a-measured-curve-reports-pages-but-no-penalty
+  (testing "nil is a missing fact, not a penalty of 1.0 -- the caller must see
+            that nothing measured this rather than read a confident 'no cost'"
+    (let [p (t/tile-plan mach {:extents [4096 4096] :element-bytes 8
+                               :arrays 3 :level 2})]
+      (is (pos-int? (:tile/pages-touched p)))
+      (is (nil? (:tile/translation-penalty p))))))
+
+(deftest reporting-a-page-cost-does-not-change-the-tile
+  (testing "the rule still sizes from bytes and capacity alone. If a later
+            change starts shrinking tiles to touch fewer pages, that is a model
+            change and must be argued and measured, not slipped in -- at these
+            page counts the streaming penalty is 1.06-1.36x and the cache reuse
+            given up to dodge it costs more"
+    (let [without (t/tile-plan mach {:extents [4096 4096] :element-bytes 8
+                                     :arrays 3 :level 2})
+          with (t/tile-plan mach-with-tlb {:extents [4096 4096] :element-bytes 8
+                                           :arrays 3 :level 2})]
+      (is (= (:tile/size without) (:tile/size with)))
+      (is (= (:tile/working-set-bytes without) (:tile/working-set-bytes with)))))
+  (testing "and :tlb-reach stays disclaimed, because reporting is not modelling"
+    (is (some #{:tlb-reach} (:model/does-not-model t/tile-model)))))
