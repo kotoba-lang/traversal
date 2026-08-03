@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0 — 2026-08-03
+
+`tiling-benefit` v2, after v1 was falsified by measurement.
+
+A hand-written NEON matmul at n=1536 (B is 18 MiB, past L2) showed blocking
+worth **2.688x**. v1 predicted **1.00x**. Two independent errors, both worth
+naming:
+
+1. **Bandwidth is not one number per machine.** The same M1 Max gives 30 GB/s
+   on a line-strided scan of a contiguous array and 10.8 GB/s to an unblocked
+   matmul walking B with a 12 KiB stride. v1 was handed the first and asked
+   about the second.
+2. **`max()` assumes an overlap that stride destroys.** With a prefetcher
+   covering the latency, loop and memory run concurrently and the slower one is
+   the cost. With a stride that defeats prefetch, misses stall the pipeline and
+   the costs *add*.
+
+With the right bandwidth and no overlap: predicted 4278 ms against 4282
+measured, 0.1%. v2 takes an `:overlap` verdict, always reports both
+`:speedup-bounds`, and says in the model data that choosing between them needs
+a fact about the stride it is not given.
+
+The earlier scalar result still fits the optimistic bound: unit-stride inner
+loop, prefetch works, predicted 1.00x and measured 1.06x.
+
+23 tests, 1865 assertions.
+
+
 ## 0.2.1 — 2026-08-03
 
 `tiling-benefit` gains a held-out validation, on one side of its threshold.

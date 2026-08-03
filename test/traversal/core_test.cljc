@@ -214,3 +214,52 @@
                                             (assoc args :loop-ns-per-op (* 0.9 threshold)))))
       (is (not (:worth-tiling? (t/tiling-benefit m1max-tile
                                                  (assoc args :loop-ns-per-op (* 1.1 threshold)))))))))
+
+;; ── the falsification that produced v2 (2026-08-03) ─────────────────────
+
+(deftest v1-under-predicted-a-neon-matmul-by-2-7x
+  (testing "n=1536, NEON kernel at 0.4395 ns/madd measured on the blocked arm,
+            and the 30 GB/s bandwidth measured on a line-strided contiguous
+            scan. v1 used max() and that bandwidth, and said 1.00x."
+    (let [wrong (t/tiling-benefit m1max-tile
+                                  {:n 1536 :tile 32 :element-bytes 8 :arrays 3
+                                   :loop-ns-per-op 0.4395
+                                   :bandwidth-bytes-per-ns 30.0
+                                   :overlap :full})]
+      (is (< 0.99 (:achievable-speedup wrong) 1.01))
+      (testing "measurement said 2.69x, so this was a real miss"
+        (is (< (:achievable-speedup wrong) 2.0))))))
+
+(deftest v2-reproduces-it-with-the-right-bandwidth-and-no-overlap
+  (testing "10.8 GB/s is what the unblocked arm actually achieves walking B
+            with a 12 KiB stride, and a stride that defeats the prefetcher
+            means misses stall rather than overlap"
+    (let [r (t/tiling-benefit m1max-tile
+                              {:n 1536 :tile 32 :element-bytes 8 :arrays 3
+                               :loop-ns-per-op 0.4395
+                               :bandwidth-bytes-per-ns 10.8
+                               :overlap :none})]
+      (testing "predicted 2.69x against a measured 2.688x"
+        (is (< 2.6 (:achievable-speedup r) 2.8)))
+      (testing "and the blocked arm's absolute time matches too"
+        (is (< 1.55e9 (get-in r [:blocked :time-ns]) 1.65e9))))))
+
+(deftest both-bounds-are-always-reported
+  (testing "choosing between them needs a fact about the stride that
+            tiling-benefit is not given, so it hands back both"
+    (let [r (t/tiling-benefit m1max-tile
+                              {:n 1536 :tile 32 :element-bytes 8 :arrays 3
+                               :loop-ns-per-op 0.4395 :bandwidth-bytes-per-ns 10.8})]
+      (is (< (get-in r [:speedup-bounds :optimistic])
+             (get-in r [:speedup-bounds :pessimistic])))
+      (is (< 1.6 (get-in r [:speedup-bounds :optimistic]) 1.8))
+      (is (< 2.6 (get-in r [:speedup-bounds :pessimistic]) 2.8)))))
+
+(deftest the-scalar-case-still-fits-the-optimistic-bound
+  (testing "a unit-stride inner loop is prefetch-friendly, so max() applies —
+            and that is the n=768 scalar run, predicted 1.00x, measured 1.06x"
+    (let [r (t/tiling-benefit m1max-tile
+                              {:n 768 :tile 48 :element-bytes 8 :arrays 3
+                               :loop-ns-per-op 0.517 :bandwidth-bytes-per-ns 30.0
+                               :overlap :full})]
+      (is (< 0.99 (:achievable-speedup r) 1.01)))))

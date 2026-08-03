@@ -377,8 +377,27 @@
 ;; ── is tiling worth anything here? ───────────────────────────────────────
 
 (def tiling-benefit-model
-  {:model/id :kotoba.traversal.tiling-benefit/v1
-   :model/rule "time(T) = max(loop-ns * n^3, traffic-bytes(T) / bandwidth)"
+  {:model/id :kotoba.traversal.tiling-benefit/v2
+   :model/rule "time(T) = combine(loop-ns * n^3, traffic-bytes(T) / bandwidth)
+                where combine is `max` when the access pattern is
+                prefetch-friendly and `+` when it is not"
+   :model/overlap
+   {:full "max — a hardware prefetcher covers the latency, so the loop and the
+           memory system run concurrently and the slower one is the cost.
+           Applies when the inner access is unit-stride."
+    :none "+ — every miss stalls the pipeline, so the costs add. Applies when
+           the stride defeats the prefetcher, which for a blocked matmul means
+           the unblocked arm walking B with a row-sized stride."
+    :measured "v1 used `max` unconditionally and under-predicted an unblocked
+               NEON matmul by 2.7x. With no-overlap and the right bandwidth it
+               predicts 4278 ms against 4282 measured."}
+   :model/bandwidth-is-not-one-number
+   "The bandwidth constant belongs to the machine AND the access pattern, not
+    to the machine alone. The same M1 Max gives 30 GB/s on a line-strided scan
+    of a contiguous array and 10.8 GB/s to an unblocked matmul walking B with a
+    12 KiB stride. Feeding the first number to a plan about the second is what
+    made v1 predict 1.00x where measurement gave 2.69x. Measure bandwidth at
+    the stride the arm being modelled actually uses."
    :model/traffic
    {:blocked "2*n^3/T + n^2 elements — each of the n^3/T^3 block triples moves
               3*T^2 elements, plus C written once"
@@ -406,11 +425,14 @@
              model reproducing that arm's absolute time (234 ms predicted
              against 234.15 measured) is circular and proves nothing. The
              speedup between the arms is the part that was actually predicted."
-    :untested "The other side of the threshold. A kernel BELOW 0.27 ns/madd
-               should show tiling mattering a lot, and clang -O2 only reached
-               0.517 here. Confirming that needs a hand-vectorised kernel, and
-               until someone runs it the threshold is verified on one side
-               only."}})
+    :other-side "Tested 2026-08-03 with a hand-written NEON kernel at n=1536,
+                 where B is 18 MiB and does not fit L2. Blocking gave 2.688x --
+                 so yes, past the threshold regime tiling matters a great deal.
+                 But v1 PREDICTED 1.00x for it, which is why this model is now
+                 v2: the failure was two independent errors, a bandwidth
+                 constant measured at the wrong stride and a max() that assumed
+                 an overlap the stride destroys. With 10.8 GB/s and no overlap
+                 it predicts 2.69x. See the v2 notes above."}})
 
 (defn tiling-benefit
   "What blocking can buy, before anyone runs it.
@@ -426,9 +448,11 @@
   `loop-ns-per-op` and `bandwidth-bytes-per-ns` must be measured somewhere
   the *other* one is not the bottleneck — see `machine-probe`'s calibrate
   path, and the 65% error that came of getting that wrong."
-  [machine {:keys [n element-bytes arrays tile loop-ns-per-op bandwidth-bytes-per-ns]
-            :or {element-bytes 8 arrays 3}}]
-  (let [n (double n)
+  [machine {:keys [n element-bytes arrays tile loop-ns-per-op bandwidth-bytes-per-ns
+                   overlap]
+            :or {element-bytes 8 arrays 3 overlap :full}}]
+  (let [combine (case overlap :full max :none +)
+        n (double n)
         ops (* n n n)
         loop-ns (* loop-ns-per-op ops)
         traffic (fn [elements] (/ (* elements (double element-bytes)) bandwidth-bytes-per-ns))
@@ -436,8 +460,11 @@
         unblocked-elements (+ ops (* 2.0 n n))
         blocked-mem (traffic blocked-elements)
         unblocked-mem (traffic unblocked-elements)
+        ;; Blocking exists to make the working set cache-resident, so the
+        ;; blocked arm is prefetch-friendly whatever the unblocked arm does.
+        ;; Only the unblocked arm gets the caller's overlap verdict.
         blocked-time (max loop-ns blocked-mem)
-        unblocked-time (max loop-ns unblocked-mem)]
+        unblocked-time (combine loop-ns unblocked-mem)]
     {:format format-id
      :tile tile
      :ops ops
@@ -446,7 +473,12 @@
                :bound-by (if (> blocked-mem loop-ns) :memory :loop)}
      :unblocked {:memory-ns unblocked-mem :time-ns unblocked-time
                  :bound-by (if (> unblocked-mem loop-ns) :memory :loop)}
+     :overlap overlap
      :achievable-speedup (/ unblocked-time blocked-time)
+     ;; Both, always, because choosing between them needs a fact about the
+     ;; stride that this function is not given.
+     :speedup-bounds {:optimistic (/ (max loop-ns unblocked-mem) blocked-time)
+                      :pessimistic (/ (+ loop-ns unblocked-mem) blocked-time)}
      ;; The whole point. When this is false, tiling is unmeasurable here no
      ;; matter how well the tile is chosen, and a sweep will return noise.
      :worth-tiling? (> unblocked-mem loop-ns)
