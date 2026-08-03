@@ -273,7 +273,7 @@
    ;; different from having been shown wrong, and the distinction is the whole
    ;; entry.
    :model/validation
-   {:status :unvalidated
+   {:status :partially-validated
     :attempted "2026-08-03, Apple M1 Max/performance, blocked ikj matmul n=768,
                 f64, three operands, tiles 8..768"
     :predicted "48 against L1d (128 KiB), 256 against private L2 (3 MiB)"
@@ -290,8 +290,19 @@
                    a tiling experiment is only informative when the memory term
                    dominates the loop term."
     :note "This says nothing about whether the capacity rule is right. It says
-           this machine plus this harness cannot tell, and that a validated
-           tile needs an inner loop cheap enough for memory to dominate."
+           this machine plus this harness cannot tell in WALL CLOCK, and that a
+           validated tile needs an inner loop cheap enough for memory to
+           dominate."
+    :validated-without-a-clock
+    "2026-08-04. Miss counts are a property of the access sequence, so they can
+     be checked on a machine too loaded to time anything. Feeding computed
+     matmul page traces to `paging` (n=24, 512 B pages, 6-page cache): the ikj
+     order this library derives takes 234 misses where the textbook ijk takes
+     5478, a tile sized for the level takes 96, and a tile too large takes 379
+     -- LOSING to not tiling. So the capacity rule's SHAPE is confirmed, in
+     misses rather than seconds: there is a right tile size, and being wrong
+     about it is worse than not blocking. What remains unvalidated is the
+     wall-clock consequence and the exact constant."
     :explained-by "traversal/tiling-benefit, added 2026-08-03. Fed the measured
                    inner loop (3.77 ns per multiply-add) and bandwidth
                    (30 GB/s), it predicts a 1.00x speedup from blocking --

@@ -335,8 +335,12 @@
   ;; measurement -- see machine/translation-penalty on why the real figures
   ;; could not be restated on the machine that produced them.
   (assoc mach :tlb {:penalty-by-pages
-                    {:dependent {16 1.00 256 1.41 512 1.73 2048 5.03}
-                     :streaming {32 1.00 128 1.06 512 1.26}}
+                    ;; De-confounded. The earlier dependent figures (512 ->
+                    ;; 1.73, 2048 -> 5.03) came from a probe whose touched
+                    ;; lines were all mutually congruent in the cache, so most
+                    ;; of that rise was conflict rather than translation.
+                    {:dependent {16 1.00 256 1.15 512 1.35 2048 1.60}
+                     :streaming {32 1.00 128 1.08 512 1.25}}
                     :source "traversal test fixture"
                     :runtime :jvm}))
 
