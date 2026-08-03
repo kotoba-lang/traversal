@@ -256,7 +256,30 @@
    ["a square tile touched by `arrays` operands, the classic blocked-matmul shape"
     "capacity is the PRIVATE share of the level: total / cores sharing it"
     "occupancy < 1 because the tile shares the level with stack, code and neighbours"]
-   :model/does-not-model [:associativity-conflicts :tlb-reach :prefetch :nuca-latency]})
+   :model/does-not-model [:associativity-conflicts :tlb-reach :prefetch :nuca-latency]
+   ;; Honest status: this tile has NOT been shown to be the fast one. That is
+   ;; different from having been shown wrong, and the distinction is the whole
+   ;; entry.
+   :model/validation
+   {:status :unvalidated
+    :attempted "2026-08-03, Apple M1 Max/performance, blocked ikj matmul n=768,
+                f64, three operands, tiles 8..768"
+    :predicted "48 against L1d (128 KiB), 256 against private L2 (3 MiB)"
+    :result "no tile separated from any other. Two runs of the same sweep named
+             different winners -- 384 then 48 -- and the best blocking beat the
+             unblocked arm by 1-5%, which perfgate refused both times."
+    :cause "the harness is loop-bound, not memory-bound. A Clojure/JVM inner
+            loop costs about 4 ns per iteration against roughly 0.15 ns of
+            memory traffic per iteration at this working-set size, so blocking
+            can move at most a few percent of the total and cannot be
+            separated from noise."
+    :precondition "perfgate/detectable? on a pilot said the minimum detectable
+                   improvement was 133% before the sweep ran. Check that first:
+                   a tiling experiment is only informative when the memory term
+                   dominates the loop term."
+    :note "This says nothing about whether the capacity rule is right. It says
+           this machine plus this harness cannot tell, and that a validated
+           tile needs an inner loop cheap enough for memory to dominate."}})
 
 (defn tile-plan
   "The largest square tile whose working set still fits a named cache level.
