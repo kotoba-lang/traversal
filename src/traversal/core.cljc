@@ -279,7 +279,14 @@
                    dominates the loop term."
     :note "This says nothing about whether the capacity rule is right. It says
            this machine plus this harness cannot tell, and that a validated
-           tile needs an inner loop cheap enough for memory to dominate."}})
+           tile needs an inner loop cheap enough for memory to dominate."
+    :explained-by "traversal/tiling-benefit, added 2026-08-03. Fed the measured
+                   inner loop (3.77 ns per multiply-add) and bandwidth
+                   (30 GB/s), it predicts a 1.00x speedup from blocking --
+                   which is what the sweep measured, and it predicts it BEFORE
+                   the sweep. It also reports the threshold: the loop would
+                   have to reach 0.27 ns per multiply-add, about one cycle,
+                   for blocking to be worth measuring at all."}})
 
 (defn tile-plan
   "The largest square tile whose working set still fits a named cache level.
@@ -366,3 +373,64 @@
      :loop/ranked ranked
      :loop/elements-per-line per-line
      :loop/machine (:machine/id machine)}))
+
+;; ── is tiling worth anything here? ───────────────────────────────────────
+
+(def tiling-benefit-model
+  {:model/id :kotoba.traversal.tiling-benefit/v1
+   :model/rule "time(T) = max(loop-ns * n^3, traffic-bytes(T) / bandwidth)"
+   :model/traffic
+   {:blocked "2*n^3/T + n^2 elements — each of the n^3/T^3 block triples moves
+              3*T^2 elements, plus C written once"
+    :unblocked "n^3 + 2*n^2 elements — B is re-streamed once per i when it does
+                not fit, A and C move once"}
+   :model/assumes
+   ["one level of blocking, square tiles, the operand that gets re-streamed is B"
+    "a tile whose working set fits the named level stays there for the block triple"
+    "loop and memory overlap perfectly, so the slower one is the whole cost"]
+   :model/does-not-model [:tlb-reach :associativity-conflicts :register-blocking :prefetch]})
+
+(defn tiling-benefit
+  "What blocking can buy, before anyone runs it.
+
+  `tile-plan` answers *how big a tile fits*. This answers the prior question —
+  *is there anything for a tile to win* — and the two are independent. A tile
+  can be perfectly sized and buy nothing, which is exactly what happened when
+  `tile-plan`'s answer was measured on a JVM matmul: every block width from 8
+  to 768 landed within 1.2x of every other.
+
+  The reason is visible in one comparison. Blocking only moves the memory
+  term, so it can only matter when the memory term is the larger one. Both
+  `loop-ns-per-op` and `bandwidth-bytes-per-ns` must be measured somewhere
+  the *other* one is not the bottleneck — see `machine-probe`'s calibrate
+  path, and the 65% error that came of getting that wrong."
+  [machine {:keys [n element-bytes arrays tile loop-ns-per-op bandwidth-bytes-per-ns]
+            :or {element-bytes 8 arrays 3}}]
+  (let [n (double n)
+        ops (* n n n)
+        loop-ns (* loop-ns-per-op ops)
+        traffic (fn [elements] (/ (* elements (double element-bytes)) bandwidth-bytes-per-ns))
+        blocked-elements (+ (/ (* 2.0 ops) (double tile)) (* n n))
+        unblocked-elements (+ ops (* 2.0 n n))
+        blocked-mem (traffic blocked-elements)
+        unblocked-mem (traffic unblocked-elements)
+        blocked-time (max loop-ns blocked-mem)
+        unblocked-time (max loop-ns unblocked-mem)]
+    {:format format-id
+     :tile tile
+     :ops ops
+     :loop-ns loop-ns
+     :blocked {:memory-ns blocked-mem :time-ns blocked-time
+               :bound-by (if (> blocked-mem loop-ns) :memory :loop)}
+     :unblocked {:memory-ns unblocked-mem :time-ns unblocked-time
+                 :bound-by (if (> unblocked-mem loop-ns) :memory :loop)}
+     :achievable-speedup (/ unblocked-time blocked-time)
+     ;; The whole point. When this is false, tiling is unmeasurable here no
+     ;; matter how well the tile is chosen, and a sweep will return noise.
+     :worth-tiling? (> unblocked-mem loop-ns)
+     ;; And if it is false: how fast would the inner loop have to get? Solving
+     ;; unblocked-mem > loop-ns * ops for loop-ns gives the threshold, which is
+     ;; a more useful thing to report than "no".
+     :loop-ns-threshold (/ unblocked-mem ops)
+     :model tiling-benefit-model
+     :machine (:machine/id machine)}))

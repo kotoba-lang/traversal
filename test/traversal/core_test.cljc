@@ -164,3 +164,53 @@
                (t/tile-plan m/unknown {:extents [16 16] :element-bytes 8})))
   (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                (t/loop-order m/unknown [:i] [{:array :A :strides {:i 1}}] 8))))
+
+;; ── tiling benefit (calibrated on an Apple M1 Max, 2026-08-03) ───────────
+
+(def ^:private m1max-tile
+  {:format m/format-id
+   :machine/id "Apple M1 Max/performance"
+   :machine/provenance :measured
+   :machine/source "sysctl -a (Darwin)"
+   :cpu {:arch :aarch64 :cores 8
+         :cache [{:level 1 :kind :data :bytes 131072 :line-bytes 128 :shared-by 1}
+                 {:level 2 :kind :unified :bytes 12582912 :line-bytes 128 :shared-by 4}]}
+   :page {:base-bytes 16384 :huge []}})
+
+(deftest a-jvm-matmul-cannot-show-tiling-and-the-model-says-so-first
+  (testing "measured inner loop 3.77 ns per multiply-add, bandwidth 30 GB/s"
+    (let [r (t/tiling-benefit m1max-tile
+                              {:n 768 :tile 48 :element-bytes 8 :arrays 3
+                               :loop-ns-per-op 3.77 :bandwidth-bytes-per-ns 30.0})]
+      (testing "both arms are loop-bound, so blocking has nothing to move"
+        (is (= :loop (get-in r [:blocked :bound-by])))
+        (is (= :loop (get-in r [:unblocked :bound-by]))))
+      (testing "predicted speedup is 1.00x — which is what the sweep measured"
+        (is (= 1.0 (:achievable-speedup r)))
+        (is (not (:worth-tiling? r))))
+      (testing "and it says how fast the loop would have to get"
+        (is (< 0.25 (:loop-ns-threshold r) 0.28))))))
+
+(deftest with-a-fast-enough-kernel-tiling-matters-enormously
+  (testing "a vectorised kernel near one cycle per multiply-add"
+    (let [r (t/tiling-benefit m1max-tile
+                              {:n 768 :tile 48 :element-bytes 8 :arrays 3
+                               :loop-ns-per-op 0.05 :bandwidth-bytes-per-ns 30.0})]
+      (is (:worth-tiling? r))
+      (is (= :memory (get-in r [:unblocked :bound-by])))
+      (testing "unblocked re-streams B once per row -- 23x the traffic -- but the
+                speedup is only 5.3x, because blocking makes the arm loop-bound
+                again. Blocking helps until the loop becomes the limit, and the
+                model says where that is rather than promising the traffic ratio."
+        (is (< 5.3 (:achievable-speedup r) 5.4))
+        (is (= :loop (get-in r [:blocked :bound-by])))))))
+
+(deftest the-threshold-is-where-the-two-terms-cross
+  (let [args {:n 512 :tile 64 :element-bytes 8 :arrays 3 :bandwidth-bytes-per-ns 30.0}
+        threshold (:loop-ns-threshold (t/tiling-benefit m1max-tile
+                                                        (assoc args :loop-ns-per-op 1.0)))]
+    (testing "just under it, tiling is worth something; just over it, nothing"
+      (is (:worth-tiling? (t/tiling-benefit m1max-tile
+                                            (assoc args :loop-ns-per-op (* 0.9 threshold)))))
+      (is (not (:worth-tiling? (t/tiling-benefit m1max-tile
+                                                 (assoc args :loop-ns-per-op (* 1.1 threshold)))))))))
