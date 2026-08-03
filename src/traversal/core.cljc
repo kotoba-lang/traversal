@@ -388,7 +388,29 @@
    ["one level of blocking, square tiles, the operand that gets re-streamed is B"
     "a tile whose working set fits the named level stays there for the block triple"
     "loop and memory overlap perfectly, so the slower one is the whole cost"]
-   :model/does-not-model [:tlb-reach :associativity-conflicts :register-blocking :prefetch]})
+   :model/does-not-model [:tlb-reach :associativity-conflicts :register-blocking :prefetch]
+   :model/validation
+   {:date "2026-08-03"
+    :machine "Apple M1 Max/performance"
+    :held-out "A C -O2 blocked ikj matmul at n=768, tiles 16 to 768, interleaved
+               across rounds so thermal drift penalises every tile equally."
+    :kernel "0.517 ns per multiply-add — above the 0.27 ns threshold this model
+             reports, so it predicts blocking buys nothing."
+    :predicted-speedup 1.00
+    :measured-speedup 1.062
+    :verdict "Held. The model said 1.00x and the best tile (48) managed 1.06x,
+              which is 6% and inside the run-to-run spread of this harness. The
+              same sweep on the JVM at 3.77 ns/madd was flat, and this one at
+              0.517 is very nearly flat — consistent with a threshold at 0.27."
+    :caveat "The loop-ns constant was taken from the UNBLOCKED arm, so the
+             model reproducing that arm's absolute time (234 ms predicted
+             against 234.15 measured) is circular and proves nothing. The
+             speedup between the arms is the part that was actually predicted."
+    :untested "The other side of the threshold. A kernel BELOW 0.27 ns/madd
+               should show tiling mattering a lot, and clang -O2 only reached
+               0.517 here. Confirming that needs a hand-vectorised kernel, and
+               until someone runs it the threshold is verified on one side
+               only."}})
 
 (defn tiling-benefit
   "What blocking can buy, before anyone runs it.

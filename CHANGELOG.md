@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.1 — 2026-08-03
+
+`tiling-benefit` gains a held-out validation, on one side of its threshold.
+
+A C -O2 blocked ikj matmul at n=768 runs at 0.517 ns per multiply-add — above
+the 0.27 ns threshold the model reports — so the model predicts blocking buys
+nothing. Measured: the best tile managed 1.062x, six percent, inside this
+harness's spread. Predicted 1.00x. Held.
+
+Two honest limits recorded with it. The loop constant came from the unblocked
+arm, so the model reproducing that arm's absolute time (234 ms predicted
+against 234.15 measured) is circular; only the speedup between arms was really
+predicted. And the *other* side of the threshold is untested: a kernel below
+0.27 ns/madd should show tiling mattering a great deal, and clang -O2 only got
+to 0.517, so confirming it needs a hand-vectorised kernel nobody has written.
+
+
 ## 0.2.0 — 2026-08-03
 
 `tiling-benefit` — is there anything for a tile to win?
