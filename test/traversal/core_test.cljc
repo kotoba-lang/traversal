@@ -371,3 +371,40 @@
       (is (= (:tile/working-set-bytes without) (:tile/working-set-bytes with)))))
   (testing "and :tlb-reach stays disclaimed, because reporting is not modelling"
     (is (some #{:tlb-reach} (:model/does-not-model t/tile-model)))))
+
+(deftest the-byte-rule-is-exact-only-because-tiles-are-line-rounded
+  (testing "tile-plan sizes from arrays*tile^2*element-bytes. That equals the
+            real footprint only when each tile row occupies WHOLE cached
+            units, which line-rounding guarantees -- so the two agree exactly,
+            and this pins the reason rather than the number"
+    (doseq [[extent line] [[[4096 4096] 64] [[4096 4096] 128] [[8192 8192] 128]]]
+      (let [mach* (assoc-in mach [:cpu :cache]
+                            [{:level 1 :kind :data :bytes 32768 :line-bytes line :shared-by 1}
+                             {:level 2 :kind :unified :bytes 1048576 :line-bytes line :shared-by 1}])
+            p (t/tile-plan mach* {:extents extent :element-bytes 8 :arrays 3 :level 2})
+            tile (:tile/size p)
+            units (t/pages-touched line {:rows tile
+                                         :row-span-bytes (* tile 8)
+                                         :row-stride-bytes (* (first extent) 8)})]
+        (is (zero? (mod (* tile 8) line))
+            "line-rounding is the precondition; without it the rest does not hold")
+        (is (= (:tile/working-set-bytes p) (* 3 units line))
+            "byte footprint and unit footprint agree")))))
+
+(deftest and-the-two-diverge-once-a-unit-is-larger-than-a-tile-row
+  (testing "the same arithmetic at PAGE granularity, where a tile row is far
+            smaller than the unit and the stride scatters rows across units.
+            Measured on a matmul page trace: at a 12-page cache the byte rule
+            says tile 11 while the fewest misses came from tile 4, which is
+            what the unit count predicts. So the byte rule is not wrong, it is
+            conditional -- and applying it to a page-granular level oversizes"
+    (let [page 512 n 48 tile 8
+          units (t/pages-touched page {:rows tile :row-span-bytes (* tile 8)
+                                       :row-stride-bytes (* n 8)})
+          byte-footprint (* 3 tile tile 8)
+          unit-footprint (* 3 units page)]
+      (is (< byte-footprint unit-footprint)
+          "the byte rule UNDER-counts the footprint here, which is why sizing
+           against it produces a tile too large for the level")
+      (is (= 1536 byte-footprint))
+      (is (= 9216 unit-footprint)))))
