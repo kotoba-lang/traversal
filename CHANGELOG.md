@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 — 2026-08-03
+
+`tiling-benefit` reads the machine's bandwidth curve **per arm**.
+
+The unblocked arm re-streams B with a whole row between consecutive k steps —
+12 KiB at n=1536 — while the blocked arm walks a resident tile contiguously.
+Those are different points on the curve, and sharing one figure between them is
+precisely what made v1 predict 1.00x against a measured 2.69x.
+
+Each arm now reports the `:stride-bytes` and `:bandwidth-bytes-per-ns` it used.
+An explicit figure still overrides both, which is how the measured result was
+reproduced before this wiring existed; with neither figure nor curve it throws
+and names both remedies.
+
+26 tests, 1874 assertions.
+
+
 ## 0.3.0 — 2026-08-03
 
 `tiling-benefit` v2, after v1 was falsified by measurement.

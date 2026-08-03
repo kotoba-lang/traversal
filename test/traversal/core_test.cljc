@@ -263,3 +263,43 @@
                                :loop-ns-per-op 0.517 :bandwidth-bytes-per-ns 30.0
                                :overlap :full})]
       (is (< 0.99 (:achievable-speedup r) 1.01)))))
+
+;; ── the arms sit at different points on the curve ────────────────────────
+
+(def ^:private m1max-curve
+  (assoc m1max-tile :bandwidth
+         {:by-stride {128 6.2 256 6.1 512 7.9 1024 15.2 2048 23.8
+                      4096 15.3 8192 13.7 16384 10.6 32768 10.2}
+          :source "machine.bench/bandwidth-curve, 256 MiB working set"
+          :runtime :jvm}))
+
+(deftest the-curve-is-read-at-each-arm-s-own-stride
+  (testing "n=1536 f64: unblocked walks a 12 KiB row between k steps, blocked
+            walks 8 bytes inside a resident tile"
+    (let [r (t/tiling-benefit m1max-curve
+                              {:n 1536 :tile 32 :element-bytes 8 :arrays 3
+                               :loop-ns-per-op 0.4395 :overlap :none})]
+      (is (= 12288 (get-in r [:unblocked :stride-bytes])))
+      (is (= 8 (get-in r [:blocked :stride-bytes])))
+      (testing "which lands them on different figures: the 8 KiB entry for the
+                row walk, the shortest measured for the contiguous one"
+        (is (= 13.7 (get-in r [:unblocked :bandwidth-bytes-per-ns])))
+        (is (= 6.2 (get-in r [:blocked :bandwidth-bytes-per-ns])))
+        (is (not= (get-in r [:unblocked :bandwidth-bytes-per-ns])
+                  (get-in r [:blocked :bandwidth-bytes-per-ns])))))))
+
+(deftest an-explicit-figure-overrides-the-curve-for-both-arms
+  (let [r (t/tiling-benefit m1max-curve
+                            {:n 1536 :tile 32 :element-bytes 8 :arrays 3
+                             :loop-ns-per-op 0.4395 :bandwidth-bytes-per-ns 10.8
+                             :overlap :none})]
+    (is (= 10.8 (get-in r [:unblocked :bandwidth-bytes-per-ns])))
+    (is (= 10.8 (get-in r [:blocked :bandwidth-bytes-per-ns])))
+    (testing "which is how the measured 2.69x was reproduced before the wiring"
+      (is (< 2.6 (:achievable-speedup r) 2.8)))))
+
+(deftest without-a-curve-or-a-figure-it-says-so
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+               (t/tiling-benefit m1max-tile
+                                 {:n 768 :tile 48 :element-bytes 8 :arrays 3
+                                  :loop-ns-per-op 0.5}))))

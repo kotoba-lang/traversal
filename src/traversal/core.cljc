@@ -452,14 +452,31 @@
                    overlap]
             :or {element-bytes 8 arrays 3 overlap :full}}]
   (let [combine (case overlap :full max :none +)
+        ;; The two arms walk different strides, so they sit at different points
+        ;; on the machine's bandwidth curve. Unblocked, B is re-streamed with a
+        ;; whole ROW between consecutive k steps; blocked, the tile is resident
+        ;; and the walk within it is contiguous. Sharing one figure between
+        ;; them is exactly what made v1 predict 1.00x against a measured 2.69x.
+        unblocked-stride (* n element-bytes)
+        blocked-stride element-bytes
+        bw-for (fn [stride]
+                 (or bandwidth-bytes-per-ns
+                     (m/bandwidth-at-stride machine (long stride))
+                     (throw (ex-info "no bandwidth for this arm"
+                                     {:phase :traversal/tiling-benefit
+                                      :machine/id (:machine/id machine)
+                                      :stride-bytes (long stride)
+                                      :remedy "pass :bandwidth-bytes-per-ns, or give the machine a measured :bandwidth curve"}))))
         n (double n)
         ops (* n n n)
         loop-ns (* loop-ns-per-op ops)
-        traffic (fn [elements] (/ (* elements (double element-bytes)) bandwidth-bytes-per-ns))
+        traffic (fn [elements bw] (/ (* elements (double element-bytes)) bw))
         blocked-elements (+ (/ (* 2.0 ops) (double tile)) (* n n))
         unblocked-elements (+ ops (* 2.0 n n))
-        blocked-mem (traffic blocked-elements)
-        unblocked-mem (traffic unblocked-elements)
+        blocked-bw (bw-for blocked-stride)
+        unblocked-bw (bw-for unblocked-stride)
+        blocked-mem (traffic blocked-elements blocked-bw)
+        unblocked-mem (traffic unblocked-elements unblocked-bw)
         ;; Blocking exists to make the working set cache-resident, so the
         ;; blocked arm is prefetch-friendly whatever the unblocked arm does.
         ;; Only the unblocked arm gets the caller's overlap verdict.
@@ -469,9 +486,11 @@
      :tile tile
      :ops ops
      :loop-ns loop-ns
-     :blocked {:memory-ns blocked-mem :time-ns blocked-time
+     :blocked {:stride-bytes (long blocked-stride) :bandwidth-bytes-per-ns blocked-bw
+               :memory-ns blocked-mem :time-ns blocked-time
                :bound-by (if (> blocked-mem loop-ns) :memory :loop)}
-     :unblocked {:memory-ns unblocked-mem :time-ns unblocked-time
+     :unblocked {:stride-bytes (long unblocked-stride) :bandwidth-bytes-per-ns unblocked-bw
+                 :memory-ns unblocked-mem :time-ns unblocked-time
                  :bound-by (if (> unblocked-mem loop-ns) :memory :loop)}
      :overlap overlap
      :achievable-speedup (/ unblocked-time blocked-time)
