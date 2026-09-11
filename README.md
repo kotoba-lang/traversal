@@ -98,7 +98,7 @@ producing a negative Morton code.
 ## Test
 
 ```sh
-clojure -M:test
+kbb -M:test
 ```
 
 Pure `.cljc`. Depends only on
